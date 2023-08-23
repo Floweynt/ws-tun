@@ -1,0 +1,33 @@
+{
+  "name": "websocket-tun",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "build": "npx tsc --build .",
+    "preclient": "npx tsc --build .",
+    "preserver": "npx tsc --build .",
+    "client": "node dist/client.js",
+    "server": "node dist/server.js"
+  },
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/ffi-napi": "^4.0.7",
+    "@types/winston": "^2.4.4",
+    "@types/ws": "^8.5.5",
+    "@typescript-eslint/eslint-plugin": "^6.4.1",
+    "@typescript-eslint/parser": "^6.4.1",
+    "eslint": "^8.47.0",
+    "typescript": "^5.1.6"
+  },
+  "dependencies": {
+    "ffi-napi": "^4.0.3",
+    "ref-napi": "^3.0.3",
+    "ref-struct-napi": "^1.1.1",
+    "walk": "^2.3.15",
+    "walk-sync": "^3.0.0",
+    "winston": "^3.10.0",
+    "ws": "^8.13.0"
+  }
+}
