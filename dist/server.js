@@ -72,6 +72,7 @@ class ConnectionInstance {
         this.close = () => {
         };
         this.forceClose = () => {
+            logging_1.logger.info("closing client");
             this.channels.forEach((socket) => {
                 socket.close();
             });
@@ -113,6 +114,9 @@ class ConnectionInstance {
                 (0, protocol_1.sendError)(socket, "packet", `bad packet type: ${packet.type}`);
             }
         }, () => {
+            (0, protocol_1.sendError)(socket, "packet", "failed to parse packet");
+            close();
+        }, () => {
             logging_1.logger.info(`${Buffer.from(this.token).toString("hex")} ${this.nonce}`);
             return (0, protocol_1.getPacketNonce)(this.token, this.nonce++);
         });
@@ -132,9 +136,17 @@ server.on("connection", (socket) => {
     });
     socket.once("message", (message) => {
         (0, assert_1.default)(message instanceof Buffer);
-        const packet = (0, protocol_1.readPacket)(message);
+        const packet = (0, protocol_1.readPacket)(message, () => {
+            // send the error to the client, and just give up
+            (0, protocol_1.sendError)(socket, "packet", "failed to parse packet");
+            socket.terminate();
+        });
+        if (packet === undefined) {
+            return;
+        }
         if (packet.type != protocol_1.C2S_HELLO) {
             (0, protocol_1.sendError)(socket, "packet", "please be polite");
+            socket.close();
             return;
         }
         const clientKey = packet.getKey();
@@ -143,9 +155,17 @@ server.on("connection", (socket) => {
         logging_1.logger.info(`client ("${packet.getClientName()}" v${packet.getClientVersion()}) connected, assigned id #${id}`);
         socket.once("message", (message) => {
             (0, assert_1.default)(message instanceof Buffer);
-            const packet = (0, protocol_1.readPacket)(message);
+            const packet = (0, protocol_1.readPacket)(message, () => {
+                // send the error to the client, and just give up
+                (0, protocol_1.sendError)(socket, "packet", "failed to parse packet");
+                socket.close();
+            });
+            if (packet === undefined) {
+                return;
+            }
             if (packet.type != protocol_1.C2S_TRY_AUTH) {
                 (0, protocol_1.sendError)(socket, "packet", "please authenticate before sending any packet");
+                socket.close();
                 return;
             }
             const success = keys.reduce((success, key) => success || (0, crypto_1.verify)(undefined, verifiable, key, packet.getSignature()), false);

@@ -117,6 +117,8 @@ const run = () => {
         else {
             (0, protocol_1.sendError)(websocket, "packet", `bad packet type: ${packet.type}`);
         }
+    }, (err) => {
+        logging_1.logger.error(err);
     });
 };
 const key = (0, fs_1.readFileSync)(args[2], "utf-8");
@@ -124,7 +126,11 @@ websocket.on("open", () => {
     (0, protocol_1.sendPacket)(websocket, protocol_1.C2SHelloPacket.create(config_1.CLIENT_NAME, config_1.VERSION, publicKey));
     websocket.once("message", (message) => {
         (0, assert_1.default)(message instanceof Buffer);
-        const packet = (0, protocol_1.readPacket)(message);
+        const packet = (0, protocol_1.readPacket)(message, () => { });
+        if (packet === undefined) {
+            console.error("handshake failure: failed to parse packet");
+            process.exit(-1);
+        }
         if (packet.type != protocol_1.S2C_HELLO) {
             logging_1.logger.error("protocol error: expected S2CHelloPacket");
             process.exit(-1);
@@ -138,7 +144,11 @@ websocket.on("open", () => {
         (0, protocol_1.sendPacket)(websocket, protocol_1.C2STryAuthenticatePacket.create((0, crypto_1.sign)(undefined, packet.getVerifiable(), key)));
         websocket.once("message", (message) => {
             (0, assert_1.default)(message instanceof Buffer);
-            const packet = (0, protocol_1.readPacket)(message);
+            const packet = (0, protocol_1.readPacket)(message, () => { });
+            if (packet === undefined) {
+                console.error("handshake failure: failed to parse packet");
+                process.exit(-1);
+            }
             if (packet.type == protocol_1.S2C_AUTH) {
                 const token = (0, crypto_1.privateDecrypt)(privateKey, packet.getToken());
                 (0, protocol_1.client)();

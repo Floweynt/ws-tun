@@ -130,6 +130,9 @@ class ConnectionInstance {
                 sendError(socket, "packet", `bad packet type: ${packet.type}`);
             }
         }, () => {
+            sendError(socket, "packet", "failed to parse packet");
+            close();
+        }, () => {
             logger.info(`${Buffer.from(this.token).toString("hex")} ${this.nonce}`);
             return getPacketNonce(this.token, this.nonce++);
         });
@@ -139,11 +142,12 @@ class ConnectionInstance {
     };
 
     public readonly forceClose = () => {
+        logger.info("closing client");
         this.channels.forEach((socket) => {
             socket.close();
         });
 
-        this.socket.close();
+        this.socket.terminate();
     };
 }
 
@@ -166,9 +170,19 @@ server.on("connection", (socket) => {
     socket.once("message", (message) => {
         assert(message instanceof Buffer);
 
-        const packet = readPacket(message);
+        const packet = readPacket(message, () => {
+            // send the error to the client, and just give up
+            sendError(socket, "packet", "failed to parse packet");
+            socket.terminate();
+        });
+
+        if(packet === undefined) {
+            return;
+        }
+
         if(packet.type != C2S_HELLO) {
             sendError(socket, "packet", "please be polite");
+            socket.terminate();
             return;
         }
 
@@ -180,9 +194,19 @@ server.on("connection", (socket) => {
         socket.once("message", (message) => {
             assert(message instanceof Buffer);
 
-            const packet = readPacket(message);
+            const packet = readPacket(message, () => {
+                // send the error to the client, and just give up
+                sendError(socket, "packet", "failed to parse packet");
+                socket.terminate();
+            });
+
+            if(packet === undefined) {
+                return;
+            }
+
             if(packet.type != C2S_TRY_AUTH) {
                 sendError(socket, "packet", "please authenticate before sending any packet");
+                socket.terminate();
                 return;
             }
 
@@ -191,6 +215,7 @@ server.on("connection", (socket) => {
 
             if(!success) {
                 sendError(socket, "auth", "failed to authenticate");
+                socket.terminate();
                 return;
             }
 

@@ -139,6 +139,8 @@ const run = () => {
         else {
             sendError(websocket, "packet", `bad packet type: ${packet.type}`);
         }
+    }, (err) => {
+        logger.error(err);
     });
 };
 
@@ -150,7 +152,12 @@ websocket.on("open", () => {
     websocket.once("message", (message) => {
         assert(message instanceof Buffer);
 
-        const packet = readPacket(message);
+        const packet = readPacket(message, () => {});
+
+        if(packet === undefined) {
+            console.error("handshake failure: failed to parse packet");
+            process.exit(-1);
+        }
 
         if(packet.type != S2C_HELLO) {
             logger.error("protocol error: expected S2CHelloPacket");
@@ -170,7 +177,12 @@ websocket.on("open", () => {
         websocket.once("message", (message) => {
             assert(message instanceof Buffer);
 
-            const packet = readPacket(message);
+            const packet = readPacket(message, () => {});
+
+            if(packet === undefined) {
+                console.error("handshake failure: failed to parse packet");
+                process.exit(-1);
+            }
 
             if(packet.type == S2C_AUTH) {
                 const token = privateDecrypt(privateKey, packet.getToken());

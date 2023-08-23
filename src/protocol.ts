@@ -398,46 +398,64 @@ export const sendError = (ws: WebSocket, category: ErrorCategory, message: strin
     sendPacket(ws, DuplexErrorPacket.create(category, message));
 };
 
-export const readPacket = (buf: Buffer): Packet => {
-    const id = buf.readUint8();
-    if(!ID_TO_CONSTRUCTOR[id]) {
-        throw Error(`failed to create packet with type = ${id}`);
-    }
-
-    const packet = ID_TO_CONSTRUCTOR[id]();
-    packet.read(new v8.Deserializer(buf.subarray(1)));
-
-    return packet;
-};
-
-export const recvPacket = (ws: WebSocket, handler: (packet: Packet) => void, getExpectedNonce?: () => Buffer) => {
-    ws.on("message", (message) => {
-        assert(message instanceof Buffer);
-
-        const id = message.readUint8();
+export const readPacket = (buf: Buffer, onError: (err: Error) => void): Packet | undefined => {
+    try {
+        const id = buf.readUint8();
+    
         if(!ID_TO_CONSTRUCTOR[id]) {
             throw Error(`failed to create packet with type = ${id}`);
         }
 
-        let packetBuf = message.subarray(1);
+        const packet = ID_TO_CONSTRUCTOR[id]();
+        packet.read(new v8.Deserializer(buf.subarray(1)));
 
-        if(getExpectedNonce) {
-            const digest = packetBuf.subarray(0, 32);
-            const expectedNonce = getExpectedNonce();
+        return packet;
+    } catch(err) {
+        if(err instanceof Error) {
+            onError(err);
+        }
+    }
+};
 
-            if(!digest.equals(expectedNonce)) {
-                sendError(ws, "token", "bad nonce");
-                return;
+export const recvPacket = (ws: WebSocket, handler: (packet: Packet) => void, onError: (err: Error) => void, getExpectedNonce?: () => Buffer) => {
+    ws.on("message", (message) => {
+        assert(message instanceof Buffer);
+
+        try {
+            const id = message.readUint8();
+            if(!ID_TO_CONSTRUCTOR[id]) {
+                throw Error(`failed to create packet with type = ${id}`);
             }
 
-            packetBuf = packetBuf.subarray(32);
+            let packetBuf = message.subarray(1);
+
+            if(getExpectedNonce) {
+                const digest = packetBuf.subarray(0, 32);
+                const expectedNonce = getExpectedNonce();
+
+                if(!digest.equals(expectedNonce)) {
+                    sendError(ws, "token", "bad nonce");
+                    return;
+                }
+
+                packetBuf = packetBuf.subarray(32);
+            }
+
+            const packet = ID_TO_CONSTRUCTOR[id]();
+            packet.read(new v8.Deserializer(packetBuf));
+
+            logger.debug(`recv packet ${packet.toString()}`);
+
+            try {
+                handler(packet);
+            } catch(err) {
+                // pass
+            }
+        } catch(err) {
+            if(err instanceof Error) {
+                onError(err);
+            }
         }
-
-        const packet = ID_TO_CONSTRUCTOR[id]();
-        packet.read(new v8.Deserializer(packetBuf));
-
-        logger.debug(`recv packet ${packet.toString()}`);
-        handler(packet);
     });
 };
 
