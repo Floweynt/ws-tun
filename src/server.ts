@@ -1,6 +1,6 @@
-import { WebSocketServer , WebSocket } from "ws";
+import { WebSocketServer , WebSocket, OPEN } from "ws";
 import { Socket, createConnection } from "net";
-import { C2S_HELLO, C2S_OPEN_TCPV4_CHANNEL, C2S_TRY_AUTH, DPX_CLOSE_CHANNEL, DPX_DATA, DPX_ERROR, DuplexCloseChannel, DuplexDataPacket, DuplexErrorPacket, getPacketNonce, logError, PROTOCOL_VERSION, readPacket, recvPacket as recvPacket, S2CAuthenticatedPacket, S2CHelloPacket, S2COpenTcpV4ChannelAck, sendError, sendPacket } from "./protocol";
+import { C2S_HELLO, C2S_OPEN_TCPV4_CHANNEL, C2S_TRY_AUTH, DPX_CLOSE_CHANNEL, DPX_DATA, DPX_ERROR, DuplexCloseChannel, DuplexDataPacket, getPacketNonce, logError, Packet, PROTOCOL_VERSION, readPacket, readPacketNonce, S2CAuthenticatedPacket, S2CHelloPacket, S2COpenTcpV4ChannelAck, sendError, writePacket } from "./protocol";
 import { SERVER_NAME, VERSION } from "./config";
 import assert from "assert";
 import { publicEncrypt, randomBytes, verify } from "crypto";
@@ -8,11 +8,13 @@ import { readFileSync }from "fs";
 import { resolve } from "path";
 import walk from "walk-sync";
 import { logger } from "./logging";
+import * as errors from "./errors";
 
 const args = process.argv.slice(1);
 
 if(args.length !== 3) {
     console.error(`Usage: ${args[0]} [port] [keys]`);
+    process.exit(-1);
 }
 
 const keys = walk(args[2], { directories: false, })
@@ -45,11 +47,11 @@ class Channel {
         
         this.socket.on("connect", () => {
             this.isStarted = true;
-            sendPacket(websocket, S2COpenTcpV4ChannelAck.create(id));
+            writePacket(websocket, S2COpenTcpV4ChannelAck.create(id));
         });
 
         this.socket.on("data", (buffer) => {
-            sendPacket(websocket, DuplexDataPacket.create(id, buffer));
+            writePacket(websocket, DuplexDataPacket.create(id, buffer));
         });
     }
 
@@ -68,7 +70,7 @@ class Channel {
         this.channels.delete(this.id);
         this.socket.destroy();
         if(send) {
-            sendPacket(this.websocket, DuplexCloseChannel.create(this.id));
+            writePacket(this.websocket, DuplexCloseChannel.create(this.id));
         }
     };
 }
@@ -79,9 +81,9 @@ class ConnectionInstance {
     private readonly token: Uint8Array;
     private nonce: number;
 
-    private readonly validateStatusControl = (channelId: number, cb: (c: Channel) => void) => {
+    private readonly validateChannel = (channelId: number, cb: (c: Channel) => void) => {
         if(!this.channels.has(channelId)) {
-            sendPacket(this.socket, DuplexErrorPacket.create("packet", `attempting to control status of nonexistent channel ${channelId}`));
+            sendError(this.socket, errors.badChannel(channelId));
             return;
         }
 
@@ -95,11 +97,31 @@ class ConnectionInstance {
         this.channels = new Map();
         this.token = token;
         this.nonce = 0;
+    }
 
-        recvPacket(socket, (packet) => {
+    readonly run = async () => {
+        while(this.socket.readyState == OPEN) {
+            let res: [Uint8Array, Packet] | undefined;
+            try {
+                res = await readPacketNonce(this.socket);
+            } catch(err) {
+                console.log(err);
+                sendError(this.socket, errors.packetParse);
+                this.socket.terminate();
+                return;
+            }
+
+            assert(res != undefined);
+            
+            const [nonce, packet] = res;
+
+            if(!getPacketNonce(this.token, this.nonce++).equals(nonce)) {
+                sendError(this.socket, errors.badNonce);
+            }
+
             if(packet.type == C2S_OPEN_TCPV4_CHANNEL) {
                 if(this.channels.has(packet.getChannelId())) {
-                    sendError(this.socket, "packet", `duplicate channel id ${packet.getChannelId()}`);
+                    sendError(this.socket, errors.duplicateChannel(packet.getChannelId()));
                 }
 
                 logger.debug(`attempted to connect to ${packet.getIp()}:${packet.getPort()}`);
@@ -108,9 +130,9 @@ class ConnectionInstance {
                 this.channels.set(packet.getChannelId(), channel);
             }
             else if(packet.type == DPX_DATA) {
-                this.validateStatusControl(packet.getChannelId(), (channel) => {
+                this.validateChannel(packet.getChannelId(), (channel) => {
                     if(!channel.started()) {
-                        sendError(socket, "packet", "writing to channel that has not been open");
+                        sendError(this.socket, errors.badChannel(packet.getChannelId()));
                         return;
                     }
 
@@ -118,7 +140,7 @@ class ConnectionInstance {
                 });
             }
             else if(packet.type == DPX_CLOSE_CHANNEL) {
-                this.validateStatusControl(packet.getChannelId(), (channel) => {
+                this.validateChannel(packet.getChannelId(), (channel) => {
                     channel.close(false);
                     this.channels.delete(packet.getChannelId());
                 });
@@ -127,18 +149,14 @@ class ConnectionInstance {
                 logError(packet);
             }
             else {
-                sendError(socket, "packet", `bad packet type: ${packet.type}`);
+                sendError(this.socket, errors.badPacketType(packet));
             }
-        }, () => {
-            sendError(socket, "packet", "failed to parse packet");
-            close();
-        }, () => {
-            logger.info(`${Buffer.from(this.token).toString("hex")} ${this.nonce}`);
-            return getPacketNonce(this.token, this.nonce++);
-        });
-    }  
+            
+        }
+    }; 
 
     public readonly close = () => {
+        this.forceClose();
     };
 
     public readonly forceClose = () => {
@@ -159,7 +177,7 @@ const server = new WebSocketServer({
     port: parseInt(args[1]),
 });
 
-server.on("connection", (socket) => {
+server.on("connection", async (socket) => {
     const id = socketId++;
 
     socket.on("close", () => {
@@ -167,64 +185,48 @@ server.on("connection", (socket) => {
         id2instance.delete(id);
     });
 
-    socket.once("message", (message) => {
-        assert(message instanceof Buffer);
+    try {
+        const hello = await readPacket(socket);
 
-        const packet = readPacket(message, () => {
-            // send the error to the client, and just give up
-            sendError(socket, "packet", "failed to parse packet");
-            socket.terminate();
-        });
-
-        if(packet === undefined) {
-            return;
-        }
-
-        if(packet.type != C2S_HELLO) {
-            sendError(socket, "packet", "please be polite");
+        if(hello.type != C2S_HELLO) {
+            sendError(socket, errors.noHandshake);
             socket.terminate();
             return;
         }
 
-        const clientKey = packet.getKey();
+        const clientKey = hello.getKey();
         const verifiable = randomBytes(32);
-        sendPacket(socket, S2CHelloPacket.create(SERVER_NAME, VERSION, PROTOCOL_VERSION, verifiable));
-        logger.info(`client ("${packet.getClientName()}" v${packet.getClientVersion()}) connected, assigned id #${id}`);
+        writePacket(socket, S2CHelloPacket.create(SERVER_NAME, VERSION, PROTOCOL_VERSION, verifiable));
+        logger.info(`client ("${hello.getClientName()}" v${hello.getClientVersion()}) connected, assigned id #${id}`);
 
-        socket.once("message", (message) => {
-            assert(message instanceof Buffer);
+        const auth = await readPacket(socket);
 
-            const packet = readPacket(message, () => {
-                // send the error to the client, and just give up
-                sendError(socket, "packet", "failed to parse packet");
-                socket.terminate();
-            });
+        if(auth.type != C2S_TRY_AUTH) {
+            sendError(socket, errors.noAuth);
+            socket.terminate();
+            return;
+        }
 
-            if(packet === undefined) {
-                return;
-            }
+        const success = keys.reduce<boolean>((success, key) => 
+            success || verify(undefined, verifiable, key, auth.getSignature()), false);
 
-            if(packet.type != C2S_TRY_AUTH) {
-                sendError(socket, "packet", "please authenticate before sending any packet");
-                socket.terminate();
-                return;
-            }
+        if(!success) {
+            sendError(socket, errors.authFail);
+            socket.terminate();
+            return;
+        }  
 
-            const success = keys.reduce<boolean>((success, key) => 
-                success || verify(undefined, verifiable, key, packet.getSignature()), false);
-
-            if(!success) {
-                sendError(socket, "auth", "failed to authenticate");
-                socket.terminate();
-                return;
-            }
-
-            const token = randomBytes(32);
-            logger.debug(`client ${id} is using token ${token.toString("hex")}`);
-            id2instance.set(id, new ConnectionInstance(socket, token));
-            sendPacket(socket, S2CAuthenticatedPacket.create(publicEncrypt(clientKey, token)));
-        });
-    });
+        const token = randomBytes(32);
+        logger.debug(`client ${id} is using token ${token.toString("hex")}`);
+        
+        const connection = new ConnectionInstance(socket, token);
+        connection.run();
+        id2instance.set(id, connection);
+        writePacket(socket, S2CAuthenticatedPacket.create(publicEncrypt(clientKey, token)));
+    } catch(err) {
+        sendError(socket, errors.packetParse);
+        socket.terminate();
+    } 
 });
 
 server.on("listening", () => {

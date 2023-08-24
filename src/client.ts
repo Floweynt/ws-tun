@@ -1,17 +1,19 @@
 import { WebSocket } from "ws";
 import { CLIENT_NAME, CLIENT_SERVER_PORT, VERSION } from "./config";
-import { C2SHelloPacket, C2SOpenTcpV4Channel, C2STryAuthenticatePacket, client, DPX_CLOSE_CHANNEL, DPX_DATA, DPX_ERROR, DuplexCloseChannel, DuplexDataPacket, DuplexErrorPacket, logError, Packet, PROTOCOL_VERSION, readPacket, recvPacket, S2C_AUTH, S2C_HELLO, S2C_OPEN_TCPV4_CHANNEL_ACK, sendError, sendPacket, setToken } from "./protocol";
+import { C2SHelloPacket, C2SOpenTcpV4Channel, C2STryAuthenticatePacket, DPX_CLOSE_CHANNEL, DPX_DATA, DPX_ERROR, DuplexCloseChannel, DuplexDataPacket, getPacketNonce, logError, readPacket, S2C_AUTH, S2C_HELLO, S2C_OPEN_TCPV4_CHANNEL_ACK, sendError, writePacket } from "./protocol";
 import assert from "assert";
 import { Socket, createServer } from "net";
 import { generateKeyPairSync, privateDecrypt, sign } from "crypto";
 import { readFileSync } from "fs";
 import { logger } from "./logging";
 import { getOriginalDest } from "./sockopt";
+import * as errors from "./errors";
 
 const args = process.argv.slice(1);
 
 if(args.length !== 3) {
     console.error(`Usage: ${args[0]} [url] [key]`);
+    process.exit(-1);
 }
 
 // generate keys
@@ -28,6 +30,11 @@ const { publicKey, privateKey, } = generateKeyPairSync("rsa", {
     },
 });
 
+let nonce = 0;
+const nextNonce = (token: Uint8Array) => {
+    return getPacketNonce(token, nonce++);
+};
+
 const websocket = new WebSocket(args[1]);
 
 class Channel {
@@ -35,12 +42,14 @@ class Channel {
     private readonly id: number;
     private isStarted: boolean;
     private isClosed: boolean;
+    private readonly token: Uint8Array;
 
-    public constructor(id: number, socket: Socket) {
+    public constructor(id: number, socket: Socket,  token: Uint8Array) {
         this.id = id;
         this.socket = socket;
         this.isStarted = false;
         this.isClosed = false;
+        this.token = token;
     }
 
     public readonly onWebsocketData = (data: Buffer) => {
@@ -55,7 +64,7 @@ class Channel {
         this.isStarted = true;
 
         this.socket.on("data", (data: Buffer) => {
-            sendPacket(websocket, DuplexDataPacket.create(this.id, data));
+            writePacket(websocket, DuplexDataPacket.create(this.id, data), nextNonce(this.token));
         });
 
         this.socket.on("close", () => {
@@ -71,7 +80,7 @@ class Channel {
         this.isClosed = true;
         this.socket.destroy();
         if(send) {
-            sendPacket(websocket, DuplexCloseChannel.create(this.id));
+            writePacket(websocket, DuplexCloseChannel.create(this.id), nextNonce(this.token));
         }
     };
 
@@ -81,9 +90,9 @@ class Channel {
 let channelId = 0;
 const channels = new Map<number, Channel>();
 
-const validateStatusControl = (channelId: number, cb: (c: Channel) => void) => {
+const validateChannel = (token: Uint8Array, channelId: number, cb: (c: Channel) => void) => {
     if(!channels.has(channelId)) {
-        sendPacket(websocket, DuplexErrorPacket.create("packet", `attempting to control status of nonexistent channel ${channelId}`));
+        sendError(websocket,  errors.badChannel(channelId), nextNonce(token));
         return;
     }
 
@@ -92,25 +101,28 @@ const validateStatusControl = (channelId: number, cb: (c: Channel) => void) => {
     cb(chan);
 };
 
-const run = () => {
+const run = async (token: Uint8Array) => {
     const server = createServer();
 
     server.on("connection", (socket: Socket) => {
         const [realTargetIp, realTargetPort] = getOriginalDest(socket);
         const id = channelId++;
-        sendPacket(websocket, C2SOpenTcpV4Channel.create(id, realTargetIp, realTargetPort));
-        channels.set(id, new Channel(id, socket));
+        writePacket(websocket, C2SOpenTcpV4Channel.create(id, realTargetIp, realTargetPort), nextNonce(token));
+        channels.set(id, new Channel(id, socket, token));
     });
 
-    server.listen(CLIENT_SERVER_PORT, "0.0.0.0", () => {
-        logger.info(`internal server started on 0.0.0.0:${CLIENT_SERVER_PORT}`);
+    server.listen(CLIENT_SERVER_PORT, "127.0.0.1", () => {
+        // we listen on loopback, since this server shouldn't be exposed to any outside traffic
+        logger.info(`internal server started on 127.0.0.1:${CLIENT_SERVER_PORT}`);
     });
 
-    recvPacket(websocket, (packet: Packet) => {
+    while(websocket.readyState == WebSocket.OPEN) {
+        const packet = await readPacket(websocket);
+
         if(packet.type == S2C_OPEN_TCPV4_CHANNEL_ACK) {
-            validateStatusControl(packet.getChannelId(), (channel) => {
+            validateChannel(token, packet.getChannelId(), (channel) => {
                 if(channel.started()) {
-                    sendError(websocket, "packet", "attempting to open an already open channel");
+                    sendError(websocket, errors.duplicateChannel(packet.getChannelId()), nextNonce(token));
                     return;
                 }
 
@@ -118,9 +130,9 @@ const run = () => {
             });
         }
         else if(packet.type == DPX_DATA) {
-            validateStatusControl(packet.getChannelId(), (channel) => {
+            validateChannel(token, packet.getChannelId(), (channel) => {
                 if(!channel.started()) {
-                    sendError(websocket, "packet", "writing to channel that has not been open");
+                    sendError(websocket, errors.useBeforeOpen(packet.getChannelId()),  nextNonce(token));
                     channel.start();
                 }
 
@@ -128,7 +140,7 @@ const run = () => {
             });
         }
         else if(packet.type == DPX_CLOSE_CHANNEL) {
-            validateStatusControl(packet.getChannelId(), (channel) => {
+            validateChannel(token, packet.getChannelId(), (channel) => {
                 channel.close(false);
                 channels.delete(packet.getChannelId());
             });
@@ -137,69 +149,50 @@ const run = () => {
             logError(packet);
         }
         else {
-            sendError(websocket, "packet", `bad packet type: ${packet.type}`);
+            sendError(websocket, errors.badPacketType(packet),  nextNonce(token));
         }
-    }, (err) => {
-        logger.error(err);
-    });
+
+    }
 };
 
 const key = readFileSync(args[2], "utf-8");
 
-websocket.on("open", () => {
-    sendPacket(websocket, C2SHelloPacket.create(CLIENT_NAME, VERSION, publicKey));
-    
-    websocket.once("message", (message) => {
-        assert(message instanceof Buffer);
+websocket.on("open", async () => {
+    try {
+        writePacket(websocket, C2SHelloPacket.create(CLIENT_NAME, VERSION, publicKey));
+        const hello = await readPacket(websocket);
 
-        const packet = readPacket(message, () => {});
-
-        if(packet === undefined) {
-            console.error("handshake failure: failed to parse packet");
-            process.exit(-1);
-        }
-
-        if(packet.type != S2C_HELLO) {
+        if(hello.type != S2C_HELLO) {
             logger.error("protocol error: expected S2CHelloPacket");
             process.exit(-1);
         }
 
-        logger.info(`connected to server: "${packet.getServerName()}" v${packet.getServerVersion()}`);
-        logger.info(`running protocol version ${packet.getProtocolVersion()}`);
+        logger.info(`connected to server: "${hello.getServerName()}" v${hello.getServerVersion()}`);
+        logger.info(`running protocol version ${hello.getProtocolVersion()}`);
 
-        if(packet.getProtocolVersion() != PROTOCOL_VERSION) {
-            logger.error(`protocol error: protocol mismatch: server wants ${packet.getProtocolVersion()}, but I support ${PROTOCOL_VERSION}`);
+
+        writePacket(websocket, C2STryAuthenticatePacket.create(sign(undefined, hello.getVerifiable(), key)));
+
+        const auth = await readPacket(websocket);
+        
+        if(auth.type == S2C_AUTH) {
+            const token = privateDecrypt(privateKey, auth.getToken());
+            logger.debug(`token = ${token.toString("hex")}`);
+            run(token);
+        }
+        else if(auth.type == DPX_ERROR) {
+            logger.error("failed to authenticate");
             process.exit(-1);
         }
-
-        sendPacket(websocket, C2STryAuthenticatePacket.create(sign(undefined, packet.getVerifiable(), key)));
-
-        websocket.once("message", (message) => {
-            assert(message instanceof Buffer);
-
-            const packet = readPacket(message, () => {});
-
-            if(packet === undefined) {
-                console.error("handshake failure: failed to parse packet");
-                process.exit(-1);
-            }
-
-            if(packet.type == S2C_AUTH) {
-                const token = privateDecrypt(privateKey, packet.getToken());
-                client();
-                setToken(token);
-                logger.debug(`token = ${token.toString("hex")}`);
-                run();
-            }
-            else if(packet.type == DPX_ERROR) {
-                logger.error("failed to authenticate");
-                process.exit(-1);
-            }
-            else {
-                logger.error("protocol error: expected S2CAuthenticatedPacket or DuplexErrorPacket");
-                process.exit(-1);
-            }
-        });
-    });
+        else {
+            logger.error("protocol error: expected S2CAuthenticatedPacket or DuplexErrorPacket");
+            process.exit(-1);
+        }
+    }
+    catch (err){
+        logger.error("handshake failed");
+        logger.debug("except", err);
+        process.exit(-1);
+    }
 });
 

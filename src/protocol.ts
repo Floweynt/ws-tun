@@ -1,17 +1,10 @@
 import v8 from "v8";
-import WebSocket from "ws";
+import WebSocket, { RawData } from "ws";
 import assert from "assert";
 import crypto from "crypto";
+import { once } from "events";
 import { logger } from "./logging";
-
-// cursed hacks
-let isClient: boolean = false;
-let nonce = 0;
-let token: Uint8Array | null = null;
-
-export const client = () => isClient = true;
-export const server = () => isClient = false;
-export const setToken = (t: Uint8Array) => token = t;
+import { ErrorCategory, ProtocolError } from "./errors";
 
 export const PROTOCOL_VERSION = 1;
 
@@ -181,37 +174,39 @@ export class S2CAuthenticatedPacket implements SerializablePacket {
         "S2CAuthenticatedPacket { ... }";
 }
 
-export type ErrorCategory = "packet" | "token" | "auth" | "ok";
-
 export class DuplexErrorPacket implements SerializablePacket {
-    private category: ErrorCategory;
-    private message: string;
+    private data: ProtocolError;
 
     public readonly type = DPX_ERROR;
 
-    private constructor(category: ErrorCategory, message: string) {
-        this.category = category;
-        this.message = message;
+    private constructor(data: ProtocolError) {
+        this.data = data;
     }
 
-    public static empty = () => new DuplexErrorPacket("ok", "");
-    public static create = (category: ErrorCategory, message: string) => new DuplexErrorPacket(category, message);
+    public static empty = () => new DuplexErrorPacket([0, "ok", ""]);
+    public static create = (data: ProtocolError) => new DuplexErrorPacket(data);
 
-    public readonly getCategory = () => { return this.category; };
-    public readonly getMessage = () => { return this.message; };
+    public readonly getData = () => { return this.data; };
+    public readonly getCode = () => { return this.data[0]; };
+    public readonly getCategory = () => { return this.data[1]; };
+    public readonly getMessage = () => { return this.data[2]; };
 
     public readonly read = (buf: v8.Deserializer) => {
-        this.category = readString(buf) as ErrorCategory;
-        this.message = readString(buf);
+        this.data = [
+            buf.readUint32(),
+            readString(buf) as ErrorCategory,
+            readString(buf)
+        ];
     };
 
     public readonly write = (buf: v8.Serializer) => {
-        writeString(buf, this.category);
-        writeString(buf, this.message);
+        buf.writeUint32(this.data[0]);    
+        writeString(buf, this.data[1]);    
+        writeString(buf, this.data[2]);    
     };
 
     public readonly toString = () =>
-        `DuplexErrorPacket(${this.category}) { message = "${this.message}" }`;
+        `DuplexErrorPacket(${this.getCategory()}) { message = "${this.getMessage()}", code = "${this.getCode()}" }`;
 }
 
 export class C2SOpenTcpV4Channel implements SerializablePacket {
@@ -364,27 +359,25 @@ export const getPacketNonce = (token: Uint8Array, nonce: number) => {
     return crypto.createHash("sha256").update(Buffer.concat([token, tempBuffer])).digest();
 };
 
-const writePacket = (packet: Packet): Buffer => {
-    const serializer = new v8.Serializer();
-
+const doWritePacket = (serializer: v8.Serializer, packet: Packet): Buffer => {
     // write id
     const tempBuffer = Buffer.alloc(1);
     tempBuffer.writeUint8(packet.type);
     serializer.writeRawBytes(tempBuffer);
     
-    if(isClient && token) {
-        const currentNonce = nonce++;
-        const packetNonce = getPacketNonce(token, currentNonce);
-        serializer.writeRawBytes(packetNonce);
-    }
-
     packet.write(serializer);
     return serializer.releaseBuffer();
 };
 
-export const sendPacket = (ws: WebSocket, packet: Packet) => {
-    logger.debug(`send packet ${packet.toString()}`);
-    ws.send(writePacket(packet), {
+export const writePacket = (ws: WebSocket, packet: Packet, nonce?: Uint8Array) => {
+    logger.debug(`send packet ${packet.toString()} ${nonce ? "w/ nonce" : ""}`);
+    const ser = new v8.Serializer();
+    if(nonce) {
+        assert(nonce.length == 32);
+        ser.writeRawBytes(nonce);
+    }
+
+    ws.send(doWritePacket(ser, packet), {
         binary: true,
     });
 };
@@ -393,74 +386,48 @@ export const logError = (packet: DuplexErrorPacket) => {
     logger.error(`(${packet.getCategory()}): ${packet.getMessage()}`);
 };
 
-export const sendError = (ws: WebSocket, category: ErrorCategory, message: string) => {
-    logger.error(`(${category}): ${message}`);
-    sendPacket(ws, DuplexErrorPacket.create(category, message));
+export const sendError = (ws: WebSocket, data: ProtocolError, token?: Uint8Array) => {
+    logger.error(`(${data[1]}): ${data[2]}`);
+    writePacket(ws, DuplexErrorPacket.create(data), token);
 };
 
-export const readPacket = (buf: Buffer, onError: (err: Error) => void): Packet | undefined => {
-    try {
-        const id = buf.readUint8();
-    
-        if(!ID_TO_CONSTRUCTOR[id]) {
-            throw Error(`failed to create packet with type = ${id}`);
-        }
+const readSocket = async(socket: WebSocket): Promise<RawData> => {
+    return (await once(socket, "message"))[0];
+};
 
-        const packet = ID_TO_CONSTRUCTOR[id]();
-        packet.read(new v8.Deserializer(buf.subarray(1)));
-
-        return packet;
-    } catch(err) {
-        if(err instanceof Error) {
-            onError(err);
-        }
+const doReadPacket = async (message: Buffer) => {
+    const id = message.readUint8();
+    if(!ID_TO_CONSTRUCTOR[id]) {
+        throw Error(`failed to create packet with type = ${id}`);
     }
+
+    const packet = ID_TO_CONSTRUCTOR[id]();
+    packet.read(new v8.Deserializer(message.subarray(1)));
+    logger.debug(`recv packet ${packet.toString()}`);
+
+    return packet;
 };
 
-export const recvPacket = (ws: WebSocket, handler: (packet: Packet) => void, onError: (err: Error) => void, getExpectedNonce?: () => Buffer) => {
-    ws.on("message", (message) => {
-        assert(message instanceof Buffer);
-
-        try {
-            const id = message.readUint8();
-            if(!ID_TO_CONSTRUCTOR[id]) {
-                throw Error(`failed to create packet with type = ${id}`);
-            }
-
-            let packetBuf = message.subarray(1);
-
-            if(getExpectedNonce) {
-                const digest = packetBuf.subarray(0, 32);
-                const expectedNonce = getExpectedNonce();
-
-                if(!digest.equals(expectedNonce)) {
-                    sendError(ws, "token", "bad nonce");
-                    return;
-                }
-
-                packetBuf = packetBuf.subarray(32);
-            }
-
-            const packet = ID_TO_CONSTRUCTOR[id]();
-            packet.read(new v8.Deserializer(packetBuf));
-
-            logger.debug(`recv packet ${packet.toString()}`);
-
-            try {
-                handler(packet);
-            } catch(err) {
-                // pass
-            }
-        } catch(err) {
-            if(err instanceof Error) {
-                onError(err);
-            }
-        }
-    });
+export const readPacket = async (socket: WebSocket): Promise<Packet> => {
+    const message = await readSocket(socket);
+    assert(message instanceof Buffer);
+    return await doReadPacket(message);
 };
+
+export const readPacketNonce = async (socket: WebSocket): Promise<[Uint8Array, Packet]> => {
+    const message = await readSocket(socket);
+    assert(message instanceof Buffer);
+    const nonce = message.subarray(0, 32);
+
+    return [nonce, await doReadPacket(message.subarray(32))];
+};
+
+// random utilities
 
 export const intToIpv4 = (ip: number): string =>
     `${ip >>> 24}.${ip >> 16 & 255}.${ip >> 8 & 255}.${ip & 255}`;
 
 export const ipv4ToInt = (ip: string): number => 
     ip.split(".").reduce((val, octet) => (val << 8) + parseInt(octet, 10), 0) >>> 0;
+
+
