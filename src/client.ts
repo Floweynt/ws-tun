@@ -1,20 +1,36 @@
+import { expectArgument, setLogLevel } from "./args";
+import commandLineArgs from "command-line-args";
+
+const options = commandLineArgs([
+    { name: "verbose", type: String, defaultValue: "info", },
+    { name: "key", alias: "k", type: String, },
+    { name: "remote", alias: "r", type: String, }
+]);
+
+const remote = options["remote"];
+const keyFile = options["key"];
+const verbosity = options["verbose"];
+
+expectArgument("missing required argument 'remote'", remote);
+expectArgument("missing required argument 'key'", keyFile);
+
+if(["info", "debug0", "debug1", "debug2", "debug3"].find((x) => x == verbosity) == undefined) {
+    console.error(`verbosity should be info or debug0-3, but got ${verbosity}`);
+    process.exit(-1);
+}
+
+setLogLevel(verbosity == "info" ? undefined : verbosity as "debug0" | "debug1" | "debug2" | "debug3");
+
+import { logger } from "./logging";
+import * as errors from "./errors";
+import { getOriginalDest } from "./sockopt";
 import { WebSocket } from "ws";
 import { CLIENT_NAME, CLIENT_SERVER_PORT, VERSION } from "./config";
-import { C2SHelloPacket, C2SOpenTcpV4Channel, C2STryAuthenticatePacket, DPX_CLOSE_CHANNEL, DPX_DATA, DPX_ERROR, DuplexCloseChannel, DuplexDataPacket, getPacketNonce, logError, readPacket, S2C_AUTH, S2C_HELLO, S2C_OPEN_TCPV4_CHANNEL_ACK, sendError, writePacket } from "./protocol";
+import { C2SHelloPacket, C2SOpenTcpV4Channel, C2STryAuthenticatePacket, DPX_CLOSE_CHANNEL, DPX_DATA, DPX_ERROR, DuplexCloseChannel, DuplexDataPacket, getPacketNonce, logError, PacketNonce, readPacket, S2C_AUTH, S2C_HELLO, S2C_OPEN_TCPV4_CHANNEL_ACK, sendError, writePacket } from "./protocol";
 import assert from "assert";
 import { Socket, createServer } from "net";
 import { generateKeyPairSync, privateDecrypt, sign } from "crypto";
 import { readFileSync } from "fs";
-import { logger } from "./logging";
-import { getOriginalDest } from "./sockopt";
-import * as errors from "./errors";
-
-const args = process.argv.slice(1);
-
-if(args.length !== 3) {
-    console.error(`Usage: ${args[0]} [url] [key]`);
-    process.exit(-1);
-}
 
 // generate keys
 const { publicKey, privateKey, } = generateKeyPairSync("rsa", {
@@ -32,14 +48,12 @@ const { publicKey, privateKey, } = generateKeyPairSync("rsa", {
 let nonce = 0;
 let channelId = 0;
 
-const nextNonce = (token: Uint8Array) => { 
-    logger.debug(`packet nonce calculated with packet count: ${nonce}`);
-    return getPacketNonce(token, nonce++); 
-};
-const channels = new Map<number, Channel>();
-const key = readFileSync(args[2], "utf-8");
-const websocket = new WebSocket(args[1]);
+const nextNonce = (token: Uint8Array): PacketNonce => getPacketNonce(token, nonce++);
 
+const channels = new Map<number, Channel>();
+const key = readFileSync(keyFile, "utf-8");
+
+const websocket = new WebSocket(remote);
 class Channel {
     private readonly socket: Socket;
     private readonly id: number;
@@ -180,7 +194,7 @@ websocket.on("open", async () => {
         
         if(auth.type == S2C_AUTH) {
             const token = privateDecrypt(privateKey, auth.getToken());
-            logger.debug(`token = ${token.toString("hex")}`);
+            logger.debug0(`token = ${token.toString("hex")}`);
             run(token);
         }
         else if(auth.type == DPX_ERROR) {
@@ -194,8 +208,13 @@ websocket.on("open", async () => {
     }
     catch (err){
         logger.error("handshake failed");
-        logger.debug("except", err);
+        logger.debug0("except", err);
         process.exit(-1);
     }
+});
+
+websocket.on("close", () => {
+    logger.fatal("connection to server was closed");
+    process.exit(-1);
 });
 

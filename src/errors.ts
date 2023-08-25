@@ -36,11 +36,14 @@ export const packetParse: ProtocolError =
 export const badNonce: ProtocolError =
     [6, "nonce", "bad nonce"];
 
+export const badPacketId: ProtocolError =
+    [7, "nonce", "bad packet id"];
+
 export const noHandshake: ProtocolError =
-    [7, "handshake", "expected handshake"];
+    [8, "handshake", "expected handshake"];
 
 export const noAuth: ProtocolError =
-    [8, "handshake", "expected authenticate"];
+    [9, "handshake", "expected authenticate"];
 
 export const authFail: ProtocolError =
-    [9, "auth", "failed to authenticate"];
+    [10, "auth", "failed to authenticate"];

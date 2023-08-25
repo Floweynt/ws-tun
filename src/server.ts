@@ -1,24 +1,43 @@
+import commandLineArgs from "command-line-args";
+import { expectArgument, setLogLevel } from "./args";
+
+const options = commandLineArgs([
+    { name: "verbose", type: String, defaultValue: "info", },
+    { name: "keys", alias: "k", type: String, },
+    { name: "port", alias: "p", type: Number, defaultValue: 8000, },
+    { name: "host", alias: "h", type: String, defaultValue: "0.0.0.0", }
+]);
+
+const port = options["port"];
+const host = options["host"];
+const keyDir = options["keys"];
+const verbosity = options["verbose"];
+
+expectArgument("missing required argument 'keys'", keyDir);
+
+if(["info", "debug0", "debug1", "debug2", "debug3"].find((x) => x == verbosity) == undefined) {
+    console.error(`verbosity should be info or debug0-3, but got ${verbosity}`);
+    process.exit(-1);
+}
+
+setLogLevel(verbosity == "info" ? undefined : verbosity as "debug0" | "debug1" | "debug2" | "debug3");
+
+import { logger } from "./logging";
 import { WebSocketServer , WebSocket, OPEN } from "ws";
 import { Socket, createConnection } from "net";
-import { C2S_HELLO, C2S_OPEN_TCPV4_CHANNEL, C2S_TRY_AUTH, DPX_CLOSE_CHANNEL, DPX_DATA, DPX_ERROR, DuplexCloseChannel, DuplexDataPacket, getPacketNonce, logError, Packet, PROTOCOL_VERSION, readPacket, readPacketNonce, S2CAuthenticatedPacket, S2CHelloPacket, S2COpenTcpV4ChannelAck, sendError, writePacket } from "./protocol";
+import { C2S_HELLO, C2S_OPEN_TCPV4_CHANNEL, C2S_TRY_AUTH, DPX_CLOSE_CHANNEL, DPX_DATA, DPX_ERROR, DuplexCloseChannel, DuplexDataPacket, 
+    getPacketNonce, logError, Packet, PacketNonce, PROTOCOL_VERSION, readPacket, readPacketNonce, S2CAuthenticatedPacket, S2CHelloPacket, 
+    S2COpenTcpV4ChannelAck, sendError, writePacket } from "./protocol";
 import { SERVER_NAME, VERSION } from "./config";
 import assert from "assert";
 import { publicEncrypt, randomBytes, verify } from "crypto";
 import { readFileSync }from "fs";
 import { resolve } from "path";
 import walk from "walk-sync";
-import { logger } from "./logging";
 import * as errors from "./errors";
 
-const args = process.argv.slice(1);
-
-if(args.length !== 3) {
-    console.error(`Usage: ${args[0]} [port] [keys]`);
-    process.exit(-1);
-}
-
-const keys = walk(args[2], { directories: false, })
-    .map((path) => resolve(args[2], path))
+const keys = walk(keyDir, { directories: false, })
+    .map((path) => resolve(keyDir, path))
     .map((path) => readFileSync(path));
 
 class Channel {
@@ -79,7 +98,7 @@ class ConnectionInstance {
     private readonly socket : WebSocket;
     private readonly channels: Map<number, Channel>;
     private readonly token: Uint8Array;
-    private nonce: number;
+    private currentId: number;
 
     private readonly validateChannel = (channelId: number, cb: (c: Channel) => void) => {
         if(!this.channels.has(channelId)) {
@@ -96,12 +115,12 @@ class ConnectionInstance {
         this.socket = socket;
         this.channels = new Map();
         this.token = token;
-        this.nonce = 0;
+        this.currentId = -1;
     }
 
     public readonly run = async () => {
         while(this.socket.readyState == OPEN) {
-            let res: [Uint8Array, Packet] | undefined;
+            let res: [PacketNonce, Packet] | undefined;
             try {
                 res = await readPacketNonce(this.socket);
             } catch(err) {
@@ -115,19 +134,30 @@ class ConnectionInstance {
             
             const [nonce, packet] = res;
 
-            const expectedNonce = getPacketNonce(this.token, this.nonce++);
-            if(!expectedNonce.equals(nonce)) {
-                logger.debug(`readPacketNonce: nonce = ${Buffer.from(nonce).toString("hex")}, expected = ${expectedNonce.toString("hex")}, n = ${this.nonce - 1}`);
+            // nonce checking
+            if(nonce[1] <= this.currentId) {
+                console.debug(`${nonce[1]} <= ${this.currentId}`);
                 sendError(this.socket, errors.badNonce);
+                continue;
+            }
+
+            this.currentId = nonce[1];
+            const expectedNonce = getPacketNonce(this.token, nonce[1]);
+        
+            if(!Buffer.from(expectedNonce[0]).equals(Buffer.from(nonce[0]))) {
+                logger.debug2(`readPacketNonce: nonce = ${Buffer.from(nonce[0]).toString("hex")}, expected = ${Buffer.from(expectedNonce[0]).toString("hex")}, n = ${nonce[1]}`);
+                sendError(this.socket, errors.badNonce);
+                continue;
             }
 
             switch(packet.type) {
             case C2S_OPEN_TCPV4_CHANNEL: {
                 if(this.channels.has(packet.getChannelId())) {
                     sendError(this.socket, errors.duplicateChannel(packet.getChannelId()));
+                    continue;
                 }
 
-                logger.debug(`attempted to connect to ${packet.getIp()}:${packet.getPort()}`);
+                logger.debug0(`attempted to connect to ${packet.getIp()}:${packet.getPort()}`);
                 const socket = createConnection(packet.getPort(), packet.getIp());
                 const channel = new Channel(packet.getChannelId(), socket, this.channels, this.socket);
                 this.channels.set(packet.getChannelId(), channel);
@@ -181,8 +211,8 @@ let socketId = 0;
 const id2instance = new Map<number, ConnectionInstance>();
 
 const server = new WebSocketServer({
-    host: "0.0.0.0",
-    port: parseInt(args[1]),
+    host: host,
+    port: port,
 });
 
 server.on("connection", async (socket) => {
@@ -224,7 +254,7 @@ server.on("connection", async (socket) => {
         }  
 
         const token = randomBytes(32);
-        logger.debug(`client ${id} is using token ${token.toString("hex")}`);
+        logger.debug0(`client ${id} is using token ${token.toString("hex")}`);
         
         const connection = new ConnectionInstance(socket, token);
         connection.run();
@@ -237,6 +267,6 @@ server.on("connection", async (socket) => {
 });
 
 server.on("listening", () => {
-    logger.info(`server started on ${ parseInt(args[1])}`);
+    logger.info(`server started on ${host}:${port}`);
 });
 

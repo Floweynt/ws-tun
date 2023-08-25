@@ -3,8 +3,8 @@ import WebSocket, { RawData } from "ws";
 import assert from "assert";
 import crypto from "crypto";
 import { once } from "events";
-import { logger } from "./logging";
 import { ErrorCategory, ProtocolError } from "./errors";
+import { logger } from "./logging";
 
 export const PROTOCOL_VERSION = 1;
 
@@ -353,10 +353,12 @@ const ID_TO_CONSTRUCTOR: {[key: number]: () => Packet} = {
     [S2C_AUTH]: S2CAuthenticatedPacket.empty,
 };
 
-export const getPacketNonce = (token: Uint8Array, nonce: number) => {
+export type PacketNonce = [Uint8Array, number];
+
+export const getPacketNonce = (token: Uint8Array, nonce: number): PacketNonce => {
     const tempBuffer = Buffer.alloc(4);
     tempBuffer.writeUint32LE(nonce);
-    return crypto.createHash("sha256").update(Buffer.concat([token, tempBuffer])).digest();
+    return [crypto.createHash("sha256").update(Buffer.concat([token, tempBuffer])).digest(), nonce];
 };
 
 const doWritePacket = (serializer: v8.Serializer, packet: Packet): Buffer => {
@@ -367,12 +369,14 @@ const doWritePacket = (serializer: v8.Serializer, packet: Packet): Buffer => {
     return serializer.releaseBuffer();
 };
 
-export const writePacket = (ws: WebSocket, packet: Packet, nonce?: Uint8Array) => {
-    logger.debug(`send packet ${packet.toString()} ${nonce ? `nonce = ${Buffer.from(nonce).toString("hex")}` : ""}`);
+export const writePacket = (ws: WebSocket, packet: Packet, nonce?: PacketNonce) => {
+    logger.debug1(`send packet ${packet.toString()} ${nonce ? `nonce = ${Buffer.from(nonce[0]).toString("hex")}, id = ${nonce[1]}` : ""}`);
     const ser = new v8.Serializer();
+
     if(nonce) {
-        assert(nonce.length == 32);
-        ser.writeRawBytes(nonce);
+        assert(nonce[0].length == 32);
+        ser.writeUint32(nonce[1]);
+        ser.writeRawBytes(nonce[0]);
     }
 
     ws.send(doWritePacket(ser, packet), {
@@ -384,7 +388,7 @@ export const logError = (packet: DuplexErrorPacket) => {
     logger.error(`(${packet.getCategory()}): ${packet.getMessage()}`);
 };
 
-export const sendError = (ws: WebSocket, data: ProtocolError, token?: Uint8Array) => {
+export const sendError = (ws: WebSocket, data: ProtocolError, token?: PacketNonce) => {
     logger.error(`(${data[1]}): ${data[2]}`);
     writePacket(ws, DuplexErrorPacket.create(data), token);
 };
@@ -393,15 +397,15 @@ const readSocket = async(socket: WebSocket): Promise<RawData> => {
     return (await once(socket, "message"))[0];
 };
 
-const doReadPacket = async (message: Buffer) => {
-    const id = message.readUint8();
+const doReadPacket = async (deserializer:  v8.Deserializer) => {
+    const id = deserializer.readRawBytes(1).readUint8();
     if(!ID_TO_CONSTRUCTOR[id]) {
         throw Error(`failed to create packet with type = ${id}`);
     }
 
     const packet = ID_TO_CONSTRUCTOR[id]();
-    packet.read(new v8.Deserializer(message.subarray(1)));
-    logger.debug(`recv packet ${packet.toString()}`);
+    packet.read(deserializer);
+    logger.debug1(`recv packet ${packet.toString()}`);
 
     return packet;
 };
@@ -409,15 +413,18 @@ const doReadPacket = async (message: Buffer) => {
 export const readPacket = async (socket: WebSocket): Promise<Packet> => {
     const message = await readSocket(socket);
     assert(message instanceof Buffer);
-    return await doReadPacket(message);
+    return await doReadPacket(new v8.Deserializer(message));
 };
 
-export const readPacketNonce = async (socket: WebSocket): Promise<[Uint8Array, Packet]> => {
+export const readPacketNonce = async (socket: WebSocket): Promise<[PacketNonce, Packet]> => {
     const message = await readSocket(socket);
     assert(message instanceof Buffer);
-    const nonce = message.subarray(0, 32);
-    logger.debug(`readPacketNonce: nonce = ${Buffer.from(nonce).toString("hex")}`);
-    return [nonce, await doReadPacket(message.subarray(32))];
+
+    const deserializer = new v8.Deserializer(message);
+    const id = deserializer.readUint32();
+    const nonce = deserializer.readRawBytes(32);
+    logger.debug1(`readPacketNonce: nonce = ${Buffer.from(nonce).toString("hex")}, id = ${id}`);
+    return [[nonce, id], await doReadPacket(deserializer)];
 };
 
 // random utilities
