@@ -99,7 +99,7 @@ class ConnectionInstance {
         this.nonce = 0;
     }
 
-    readonly run = async () => {
+    public readonly run = async () => {
         while(this.socket.readyState == OPEN) {
             let res: [Uint8Array, Packet] | undefined;
             try {
@@ -115,11 +115,14 @@ class ConnectionInstance {
             
             const [nonce, packet] = res;
 
-            if(!getPacketNonce(this.token, this.nonce++).equals(nonce)) {
+            const expectedNonce = getPacketNonce(this.token, this.nonce++);
+            if(!expectedNonce.equals(nonce)) {
+                logger.debug(`readPacketNonce: nonce = ${Buffer.from(nonce).toString("hex")}, expected = ${expectedNonce.toString("hex")}, n = ${this.nonce - 1}`);
                 sendError(this.socket, errors.badNonce);
             }
 
-            if(packet.type == C2S_OPEN_TCPV4_CHANNEL) {
+            switch(packet.type) {
+            case C2S_OPEN_TCPV4_CHANNEL: {
                 if(this.channels.has(packet.getChannelId())) {
                     sendError(this.socket, errors.duplicateChannel(packet.getChannelId()));
                 }
@@ -128,8 +131,10 @@ class ConnectionInstance {
                 const socket = createConnection(packet.getPort(), packet.getIp());
                 const channel = new Channel(packet.getChannelId(), socket, this.channels, this.socket);
                 this.channels.set(packet.getChannelId(), channel);
+                break;
             }
-            else if(packet.type == DPX_DATA) {
+
+            case DPX_DATA:
                 this.validateChannel(packet.getChannelId(), (channel) => {
                     if(!channel.started()) {
                         sendError(this.socket, errors.badChannel(packet.getChannelId()));
@@ -138,20 +143,23 @@ class ConnectionInstance {
 
                     channel.onData(packet.getData());
                 });
-            }
-            else if(packet.type == DPX_CLOSE_CHANNEL) {
+                break;
+
+            case DPX_CLOSE_CHANNEL:
+
                 this.validateChannel(packet.getChannelId(), (channel) => {
                     channel.close(false);
                     this.channels.delete(packet.getChannelId());
                 });
-            }
-            else if(packet.type == DPX_ERROR) {
-                logError(packet);
-            }
-            else {
-                sendError(this.socket, errors.badPacketType(packet));
-            }
+                break;
             
+            case DPX_ERROR:
+                logError(packet);
+                break;
+
+            default:
+                sendError(this.socket, errors.badPacketType(packet));
+            }            
         }
     }; 
 
@@ -207,8 +215,7 @@ server.on("connection", async (socket) => {
             return;
         }
 
-        const success = keys.reduce<boolean>((success, key) => 
-            success || verify(undefined, verifiable, key, auth.getSignature()), false);
+        const success = keys.reduce<boolean>((success, key) => success || verify(undefined, verifiable, key, auth.getSignature()), false);
 
         if(!success) {
             sendError(socket, errors.authFail);

@@ -49,8 +49,8 @@ export class C2SHelloPacket implements SerializablePacket {
         this.key = key;
     }
 
-    public static empty = () => new C2SHelloPacket("", "", ""); 
-    public static create = (clientName: string, clientVer: string, key: string) => new C2SHelloPacket(clientName, clientVer, key);
+    public static readonly empty = () => new C2SHelloPacket("", "", ""); 
+    public static readonly create = (clientName: string, clientVer: string, key: string) => new C2SHelloPacket(clientName, clientVer, key);
 
     public readonly getClientVersion = () => { return this.clientVer; };
     public readonly getClientName = () => { return this.clientName; };
@@ -91,8 +91,8 @@ export class S2CHelloPacket implements SerializablePacket {
         }
     }
 
-    public static empty =  () => new S2CHelloPacket("", "", -1, new Uint8Array(32)); 
-    public static create = (serverName: string, serverVersion: string, protocolVersion: number, verifiable: Uint8Array) => 
+    public static readonly empty = () => new S2CHelloPacket("", "", -1, new Uint8Array(32)); 
+    public static readonly create = (serverName: string, serverVersion: string, protocolVersion: number, verifiable: Uint8Array) => 
         new S2CHelloPacket(serverName, serverVersion, protocolVersion, verifiable); 
 
     public readonly getServerName = () => { return this.serverName; };
@@ -127,8 +127,8 @@ export class C2STryAuthenticatePacket implements SerializablePacket {
         this.signature = signature;
     }
 
-    public static empty = () => new C2STryAuthenticatePacket(Buffer.alloc(0)); 
-    public static create = (signature: Buffer) => 
+    public static readonly empty = () => new C2STryAuthenticatePacket(Buffer.alloc(0)); 
+    public static readonly create = (signature: Buffer) => 
         new C2STryAuthenticatePacket(signature); 
 
     public readonly getSignature = () => { return this.signature; };
@@ -155,8 +155,8 @@ export class S2CAuthenticatedPacket implements SerializablePacket {
         this.token = token;
     }
 
-    public static empty = () => new S2CAuthenticatedPacket(Buffer.alloc(0)); 
-    public static create = (token: Buffer) => 
+    public static readonly empty = () => new S2CAuthenticatedPacket(Buffer.alloc(0)); 
+    public static readonly create = (token: Buffer) => 
         new S2CAuthenticatedPacket(token); 
 
     public readonly getToken = () => { return this.token; };
@@ -183,8 +183,8 @@ export class DuplexErrorPacket implements SerializablePacket {
         this.data = data;
     }
 
-    public static empty = () => new DuplexErrorPacket([0, "ok", ""]);
-    public static create = (data: ProtocolError) => new DuplexErrorPacket(data);
+    public static readonly empty = () => new DuplexErrorPacket([0, "ok", ""]);
+    public static readonly create = (data: ProtocolError) => new DuplexErrorPacket(data);
 
     public readonly getData = () => { return this.data; };
     public readonly getCode = () => { return this.data[0]; };
@@ -222,8 +222,8 @@ export class C2SOpenTcpV4Channel implements SerializablePacket {
         this.port = port;
     }
 
-    public static empty = () => new C2SOpenTcpV4Channel(-1, 0, 0);
-    public static create = (channelId: number, ip: number | string, port: number) => 
+    public static readonly empty = () => new C2SOpenTcpV4Channel(-1, 0, 0);
+    public static readonly create = (channelId: number, ip: number | string, port: number) => 
         new C2SOpenTcpV4Channel(channelId, typeof ip === "number" ? ip : ipv4ToInt(ip), port);
 
     public readonly getChannelId = () => { return this.channelId; };
@@ -255,8 +255,8 @@ export class S2COpenTcpV4ChannelAck implements SerializablePacket {
         this.channelId = channelId;
     }
 
-    public static empty = () => new S2COpenTcpV4ChannelAck(-1) ;
-    public static create = (channelId: number) => new S2COpenTcpV4ChannelAck(channelId);
+    public static readonly empty = () => new S2COpenTcpV4ChannelAck(-1) ;
+    public static readonly create = (channelId: number) => new S2COpenTcpV4ChannelAck(channelId);
 
     public readonly getChannelId = () => { return this.channelId; };
 
@@ -281,8 +281,8 @@ export class DuplexCloseChannel implements SerializablePacket {
         this.channelId = channelId;
     }
 
-    public static empty = () => new DuplexCloseChannel(-1);
-    public static create = (channelId: number) => new DuplexCloseChannel(channelId);
+    public static readonly empty = () => new DuplexCloseChannel(-1);
+    public static readonly create = (channelId: number) => new DuplexCloseChannel(channelId);
 
     public readonly getChannelId = () => { return this.channelId; };
 
@@ -309,8 +309,8 @@ export class DuplexDataPacket implements SerializablePacket{
         this.data = data;
     }
 
-    public static empty = () => new DuplexDataPacket(-1, Buffer.alloc(0)) ;
-    public static create = (channelId: number, data: Buffer) => new DuplexDataPacket(channelId, data);
+    public static readonly empty = () => new DuplexDataPacket(-1, Buffer.alloc(0)) ;
+    public static readonly create = (channelId: number, data: Buffer) => new DuplexDataPacket(channelId, data);
 
     public readonly getChannelId = () => { return this.channelId; };
     public readonly getData = () => { return this.data; };
@@ -360,17 +360,15 @@ export const getPacketNonce = (token: Uint8Array, nonce: number) => {
 };
 
 const doWritePacket = (serializer: v8.Serializer, packet: Packet): Buffer => {
-    // write id
     const tempBuffer = Buffer.alloc(1);
     tempBuffer.writeUint8(packet.type);
-    serializer.writeRawBytes(tempBuffer);
-    
+    serializer.writeRawBytes(tempBuffer); 
     packet.write(serializer);
     return serializer.releaseBuffer();
 };
 
 export const writePacket = (ws: WebSocket, packet: Packet, nonce?: Uint8Array) => {
-    logger.debug(`send packet ${packet.toString()} ${nonce ? "w/ nonce" : ""}`);
+    logger.debug(`send packet ${packet.toString()} ${nonce ? `nonce = ${Buffer.from(nonce).toString("hex")}` : ""}`);
     const ser = new v8.Serializer();
     if(nonce) {
         assert(nonce.length == 32);
@@ -418,7 +416,7 @@ export const readPacketNonce = async (socket: WebSocket): Promise<[Uint8Array, P
     const message = await readSocket(socket);
     assert(message instanceof Buffer);
     const nonce = message.subarray(0, 32);
-
+    logger.debug(`readPacketNonce: nonce = ${Buffer.from(nonce).toString("hex")}`);
     return [nonce, await doReadPacket(message.subarray(32))];
 };
 

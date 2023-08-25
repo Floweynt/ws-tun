@@ -17,7 +17,6 @@ if(args.length !== 3) {
 }
 
 // generate keys
-
 const { publicKey, privateKey, } = generateKeyPairSync("rsa", {
     modulusLength: 4096,
     publicKeyEncoding: {
@@ -31,10 +30,14 @@ const { publicKey, privateKey, } = generateKeyPairSync("rsa", {
 });
 
 let nonce = 0;
-const nextNonce = (token: Uint8Array) => {
-    return getPacketNonce(token, nonce++);
-};
+let channelId = 0;
 
+const nextNonce = (token: Uint8Array) => { 
+    logger.debug(`packet nonce calculated with packet count: ${nonce}`);
+    return getPacketNonce(token, nonce++); 
+};
+const channels = new Map<number, Channel>();
+const key = readFileSync(args[2], "utf-8");
 const websocket = new WebSocket(args[1]);
 
 class Channel {
@@ -87,9 +90,6 @@ class Channel {
     public readonly started = () => this.isStarted && !this.isClosed;
 }
 
-let channelId = 0;
-const channels = new Map<number, Channel>();
-
 const validateChannel = (token: Uint8Array, channelId: number, cb: (c: Channel) => void) => {
     if(!channels.has(channelId)) {
         sendError(websocket,  errors.badChannel(channelId), nextNonce(token));
@@ -119,7 +119,8 @@ const run = async (token: Uint8Array) => {
     while(websocket.readyState == WebSocket.OPEN) {
         const packet = await readPacket(websocket);
 
-        if(packet.type == S2C_OPEN_TCPV4_CHANNEL_ACK) {
+        switch(packet.type) {
+        case S2C_OPEN_TCPV4_CHANNEL_ACK:
             validateChannel(token, packet.getChannelId(), (channel) => {
                 if(channel.started()) {
                     sendError(websocket, errors.duplicateChannel(packet.getChannelId()), nextNonce(token));
@@ -128,8 +129,9 @@ const run = async (token: Uint8Array) => {
 
                 channel.start();
             });
-        }
-        else if(packet.type == DPX_DATA) {
+            break;
+
+        case DPX_DATA:
             validateChannel(token, packet.getChannelId(), (channel) => {
                 if(!channel.started()) {
                     sendError(websocket, errors.useBeforeOpen(packet.getChannelId()),  nextNonce(token));
@@ -138,24 +140,25 @@ const run = async (token: Uint8Array) => {
 
                 channel.onWebsocketData(packet.getData());
             });
-        }
-        else if(packet.type == DPX_CLOSE_CHANNEL) {
+            break;
+
+        case DPX_CLOSE_CHANNEL:
             validateChannel(token, packet.getChannelId(), (channel) => {
                 channel.close(false);
                 channels.delete(packet.getChannelId());
             });
-        }
-        else if(packet.type == DPX_ERROR) {
-            logError(packet);
-        }
-        else {
-            sendError(websocket, errors.badPacketType(packet),  nextNonce(token));
-        }
+            break;
 
+        case DPX_ERROR:
+            logError(packet);
+            break;
+
+        default: 
+            sendError(websocket, errors.badPacketType(packet),  nextNonce(token));
+            break;
+        }
     }
 };
-
-const key = readFileSync(args[2], "utf-8");
 
 websocket.on("open", async () => {
     try {
