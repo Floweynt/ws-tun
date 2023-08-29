@@ -1,13 +1,13 @@
 
 type VerboseLevel = "debug0" | "debug1" | "debug2" | "debug3";
 
-let l: VerboseLevel | undefined;
-export const setLogLevel = (level?: VerboseLevel) => { 
-    l = level;
+let level: VerboseLevel | undefined;
+export const setLogLevel = (newLevel?: VerboseLevel) => { 
+    level = newLevel;
 };
 
 export const getLogLevel = (): VerboseLevel | undefined => {
-    return l;
+    return level;
 };
 
 export const expectArgument  = (name: string, val: unknown) => {

@@ -150,48 +150,52 @@ class ConnectionInstance {
                 continue;
             }
 
-            switch(packet.type) {
-            case C2S_OPEN_TCPV4_CHANNEL: {
-                if(this.channels.has(packet.getChannelId())) {
-                    sendError(this.socket, errors.duplicateChannel(packet.getChannelId()));
-                    continue;
-                }
-
-                logger.debug0(`attempted to connect to ${packet.getIp()}:${packet.getPort()}`);
-                const socket = createConnection(packet.getPort(), packet.getIp());
-                const channel = new Channel(packet.getChannelId(), socket, this.channels, this.socket);
-                this.channels.set(packet.getChannelId(), channel);
-                break;
-            }
-
-            case DPX_DATA:
-                this.validateChannel(packet.getChannelId(), (channel) => {
-                    if(!channel.started()) {
-                        sendError(this.socket, errors.badChannel(packet.getChannelId()));
-                        return;
-                    }
-
-                    channel.onData(packet.getData());
-                });
-                break;
-
-            case DPX_CLOSE_CHANNEL:
-
-                this.validateChannel(packet.getChannelId(), (channel) => {
-                    channel.close(false);
-                    this.channels.delete(packet.getChannelId());
-                });
-                break;
-            
-            case DPX_ERROR:
-                logError(packet);
-                break;
-
-            default:
-                sendError(this.socket, errors.badPacketType(packet));
-            }            
+            this.handlePacket(packet);
         }
     }; 
+    
+    private readonly handlePacket = (packet: Packet) => {
+        switch(packet.type) {
+        case C2S_OPEN_TCPV4_CHANNEL: {
+            if(this.channels.has(packet.getChannelId())) {
+                sendError(this.socket, errors.duplicateChannel(packet.getChannelId()));
+                return;
+            }
+
+            logger.debug0(`attempted to connect to ${packet.getIp()}:${packet.getPort()}`);
+            const socket = createConnection(packet.getPort(), packet.getIp());
+            const channel = new Channel(packet.getChannelId(), socket, this.channels, this.socket);
+            this.channels.set(packet.getChannelId(), channel);
+            break;
+        }
+
+        case DPX_DATA:
+            this.validateChannel(packet.getChannelId(), (channel) => {
+                if(!channel.started()) {
+                    sendError(this.socket, errors.badChannel(packet.getChannelId()));
+                    return;
+                }
+
+                channel.onData(packet.getData());
+            });
+            break;
+
+        case DPX_CLOSE_CHANNEL:
+
+            this.validateChannel(packet.getChannelId(), (channel) => {
+                channel.close(false);
+                this.channels.delete(packet.getChannelId());
+            });
+            break;
+        
+        case DPX_ERROR:
+            logError(packet);
+            break;
+
+        default:
+            sendError(this.socket, errors.badPacketType(packet));
+        } 
+    };
 
     public readonly close = () => {
         this.forceClose();
@@ -254,7 +258,7 @@ server.on("connection", async (socket) => {
         }  
 
         const token = randomBytes(32);
-        logger.debug0(`client ${id} is using token ${token.toString("hex")}`);
+        logger.debug0(`client #${id} is using token ${token.toString("hex")}`);
         
         const connection = new ConnectionInstance(socket, token);
         connection.run();

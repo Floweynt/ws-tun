@@ -54,6 +54,7 @@ const channels = new Map<number, Channel>();
 const key = readFileSync(keyFile, "utf-8");
 
 const websocket = new WebSocket(remote);
+
 class Channel {
     private readonly socket: Socket;
     private readonly id: number;

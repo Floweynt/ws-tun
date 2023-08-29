@@ -27,13 +27,13 @@ const levels = {
 };
 
 export const logger = ((verboseLevel?: "debug0" | "debug1" | "debug2" | "debug3") => { 
-    let l: typeof verboseLevel | "info" = verboseLevel;
-    if(!l) {
-        l = env == "dev" ? "debug0" : "info";
+    let level: typeof verboseLevel | "info" = verboseLevel;
+    if(!level) {
+        level = env == "dev" ? "debug0" : "info";
     }
 
     return winston.createLogger({
-        level: l,
+        level: level,
         levels: levels.levels,
         format: winston.format.colorize(),
         transports: [
